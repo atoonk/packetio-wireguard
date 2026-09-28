@@ -5,6 +5,11 @@
 #   sudo test/veth.sh [path/to/wgpio]
 set -euo pipefail
 WGPIO=${1:-$(dirname "$0")/../bin/wgpio}
+# The frames are injected with python3 and counted with tcpdump; without tcpdump the
+# count is silently zero and the test reports a failure that is not one.
+for t in python3 tcpdump ip; do
+  command -v $t >/dev/null || { echo "veth.sh needs $t (apt install tcpdump python3 iproute2)"; exit 2; }
+done
 # The ladder's binaries are wgpio-stock, wgpio-p1 ... so cleanup must kill the
 # name it actually started, not "wgpio".
 WGNAME=$(basename "$WGPIO")

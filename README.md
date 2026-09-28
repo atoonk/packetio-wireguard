@@ -76,5 +76,10 @@ goroutines (the fork's replay-window lock and wider window still apply). See
 make build && sudo test/veth.sh    # two gateways over a veth pair through DPDK's net_af_packet vdev
 ```
 
+On a fresh Ubuntu 24.04 box that takes Go 1.26, `git`, `libdpdk-dev` (or `libibverbs-dev`
+for the mlx5 build), `tcpdump` and `python3`; `make check-patches` needs no git
+identity, and the whole sequence, clone to PASS, was checked on a machine that had none
+of it installed.
+
 The script kills every `wgpio` on the box when it cleans up; do not run it on a
 gateway host.
