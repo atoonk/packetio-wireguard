@@ -17,9 +17,10 @@ test:
 patches:
 	rm -f patches/*.patch
 	git -C $(FORK) format-patch -q -o $(CURDIR)/patches $(UPSTREAM_COMMIT)..$(FORK_BRANCH)
-# The record must rebuild the fork exactly.
+# The record must rebuild the fork exactly. git am needs a committer identity, and a
+# fresh machine has none, so the check brings its own.
 check-patches:
 	@tmp=$$(mktemp -d); git clone -q $(FORK) $$tmp/wg && git -C $$tmp/wg checkout -q $(UPSTREAM_COMMIT) && \
-	  git -C $$tmp/wg am -q $(CURDIR)/patches/*.patch && \
+	  git -C $$tmp/wg -c user.name=check-patches -c user.email=check-patches@localhost am -q $(CURDIR)/patches/*.patch && \
 	  a=$$(git -C $$tmp/wg write-tree) && b=$$(git -C $(FORK) rev-parse $(FORK_BRANCH)^{tree}) && \
 	  rm -rf $$tmp && [ "$$a" = "$$b" ] && echo "patches match the fork ($$a)" || { echo "PATCH RECORD DOES NOT MATCH THE FORK"; exit 1; }
