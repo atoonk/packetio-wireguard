@@ -1,0 +1,7 @@
+/wgpio
+/bin/
+*.pprof
+*.csv.tmp
+/bench/keys/
+/docs/BLOG.md
+/docs/archive/

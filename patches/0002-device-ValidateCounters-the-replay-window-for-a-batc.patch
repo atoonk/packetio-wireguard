@@ -1,0 +1,60 @@
+From 6564395859a9672d0fb0d090585ed30d73545801 Mon Sep 17 00:00:00 2001
+From: Andree Toonk <atoonk@gmail.com>
+Date: Sat, 19 Sep 2026 00:34:36 +0000
+Subject: [PATCH 2/4] device: ValidateCounters, the replay window for a batch
+ under one lock
+
+---
+ device/fastpath.go      | 14 ++++++++++++++
+ device/fastpath_test.go | 13 +++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/device/fastpath.go b/device/fastpath.go
+index 6cc29f6..2d0f848 100644
+--- a/device/fastpath.go
++++ b/device/fastpath.go
+@@ -159,6 +159,20 @@ func (kp *Keypair) validateCounter(counter uint64) bool {
+ 	return ok
+ }
+ 
++// ValidateCounters runs the anti-replay window for a batch of authenticated
++// counters under one lock acquisition, setting ok[i] for each; len(ok) must
++// be at least len(counters). At millions of packets per second across
++// several receive cores, a lock per packet on one keypair's window is the
++// serialization point, and a lock per batch is not. The batch is validated
++// in arrival order, exactly as the per-packet loop would.
++func (kp *Keypair) ValidateCounters(counters []uint64, ok []bool) {
++	kp.replayMu.Lock()
++	for i, c := range counters {
++		ok[i] = kp.replayFilter.ValidateCounter(c, RejectAfterMessages)
++	}
++	kp.replayMu.Unlock()
++}
++
+ // ReserveNonces takes n consecutive send nonces and returns the first. ok is
+ // false when the keypair is expired or has no budget left, in which case the
+ // caller must not send on it (SendStagedPackets in that state starts a new
+diff --git a/device/fastpath_test.go b/device/fastpath_test.go
+index 8b3c9a4..aa3a6d8 100644
+--- a/device/fastpath_test.go
++++ b/device/fastpath_test.go
+@@ -160,3 +160,16 @@ func TestKeypairObserverLifecycle(t *testing.T) {
+ 		t.Fatalf("%d keypairs, %d retirements, events %v", len(kps), count(KeypairRetired), events)
+ 	}
+ }
++
++// A batch validation accepts exactly what per-packet validation would.
++func TestValidateCountersBatch(t *testing.T) {
++	a, b := testKeypair(t), testKeypair(t)
++	counters := []uint64{5, 3, 5, 9000, 1, 8999, 9000, 20000, 11000}
++	ok := make([]bool, len(counters))
++	a.ValidateCounters(counters, ok)
++	for i, c := range counters {
++		if want := b.ValidateCounter(c); ok[i] != want {
++			t.Fatalf("counter %d: batch %v, single %v", c, ok[i], want)
++		}
++	}
++}
+-- 
+2.43.0
+

@@ -1,0 +1,4 @@
+wgpio-p4-mx      fork=9b70a70 device: the fast path touches the timers at most every 50 ms per peer tags=mlx5 wgpio=9900055+dirty(kernel-tun)
+wgpio-stock-mx   fork=ecfc5a8 upstream  tags=mlx5,stockwg  wgpio=9900055+dirty(kernel-tun,rx-depth,mqtun,shared-vlan)  sha256=cb39118a6405c94d
+wggo-fast        fork=9b70a70 (p4 state; uses the p1 API)  tags=none  wgpio=bdb885d
+wggo-mq          fork=ecfc5a8 upstream  tags=none

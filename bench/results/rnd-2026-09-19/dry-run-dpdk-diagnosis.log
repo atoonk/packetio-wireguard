@@ -1,0 +1,120 @@
+=== STEP1 kernel  A<-B  (2026-09-19T13:38:21Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[netdev]: vlan-filter= rx-vlan-offload=onon netdev=1
+cmd: sleep 16
+blaster: sent=2048 secs=5 pps=409
+receiver says: 
+deltas: rx_packets_phy=+357  rx_vport_unicast_packets=+257  rx_steer_missed_packets=+28  eno2_kernel_rx=+329  vlan_kernel_rx=+329
+=== STEP1 kernel  B<-A  (2026-09-19T13:38:57Z)
+receiver=103.88.233.111 sender=103.88.233.93 state[netdev]: vlan-filter= rx-vlan-offload=onon netdev=1
+cmd: sleep 16
+blaster: sent=2048 secs=5 pps=409
+receiver says: 
+deltas: rx_packets_phy=+369  rx_vport_unicast_packets=+256  rx_steer_missed_packets=+29  eno2_kernel_rx=+340  vlan_kernel_rx=+340
+=== STEP2 af_xdp  A<-B  (2026-09-19T13:39:34Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[netdev]: vlan-filter= rx-vlan-offload=onon netdev=1
+cmd: /tmp/xdprx -i eno2 -queues 4 -duration 15s
+blaster: sent=2048 secs=5 pps=409
+receiver says: af_xdp open on eno2, 4 receive queues received 0 packets 
+deltas: rx_packets_phy=+357  rx_vport_unicast_packets=+256  rx_steer_missed_packets=+29  eno2_kernel_rx=+328  vlan_kernel_rx=+328
+=== STEP3 verbs   A<-B  (2026-09-19T13:40:11Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[netdev]: vlan-filter= rx-vlan-offload=onon netdev=1
+cmd: /tmp/steer -i eno2 -vlan 2049 -udp-port 9000 -duration 15s
+blaster: sent=2048 secs=5 pps=409
+receiver says: received 225 packets: 
+deltas: rx_packets_phy=+357  rx_vport_unicast_packets=+256  rx_steer_missed_packets=+29  eno2_kernel_rx=+103  vlan_kernel_rx=+103
+=== STEP3 verbs   B<-A  (2026-09-19T13:40:48Z)
+receiver=103.88.233.111 sender=103.88.233.93 state[netdev]: vlan-filter= rx-vlan-offload=onon netdev=1
+cmd: /tmp/steer -i eno2 -vlan 2049 -udp-port 9000 -duration 15s
+blaster: sent=2048 secs=5 pps=409
+receiver says: received 194 packets: 
+deltas: rx_packets_phy=+369  rx_vport_unicast_packets=+256  rx_steer_missed_packets=+29  eno2_kernel_rx=+146  vlan_kernel_rx=+146
+=== STEP2 af_xdp  A<-B (flows=1)  (2026-09-19T13:42:01Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[netdev]: vlan-filter=on rx-vlan-offload=on netdev=1
+cmd: /tmp/xdprx -i eno2 -queues 4 -duration 15s
+blaster: sent=7939072 secs=5 pps=1587814
+receiver says: af_xdp open on eno2, 4 receive queues received 0 packets 
+deltas: rx_packets_phy=+7939097  rx_vport_unicast_packets=+7939072  rx_steer_missed_packets=+25  eno2_kernel_rx=+7939072  vlan_kernel_rx=+7939072
+=== STEP4 testpmd WORKING RECIPE  A<-B: promisc, no rule, filter on, NO netdev, rxvlan off  (2026-09-19T13:42:34Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=7826432 secs=5 pps=1565286
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+7826456  rx_vport_unicast_packets=+7826432  rx_steer_missed_packets=+7826456  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4 testpmd WORKING RECIPE  B<-A  (2026-09-19T13:43:07Z)
+receiver=103.88.233.111 sender=103.88.233.93 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8075776 secs=5 pps=1615155
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8075802  rx_vport_unicast_packets=+8075776  rx_steer_missed_packets=+8075801  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4b(i)  A<-B: same but rx-vlan-filter OFF  (2026-09-19T13:43:39Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev-filter-rxvlan]: vlan-filter=off rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=7814656 secs=5 pps=1562931
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+7814682  rx_vport_unicast_packets=+7814656  rx_steer_missed_packets=+26  eno2_kernel_rx=+7814656  vlan_kernel_rx=+0
+=== STEP4b(ii) A<-B: same but vlan.2049 netdev PRESENT  (2026-09-19T13:44:12Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[netdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=1
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8156160 secs=5 pps=1631232
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8156186  rx_vport_unicast_packets=+8156161  rx_steer_missed_packets=+25  eno2_kernel_rx=+8156161  vlan_kernel_rx=+8156161
+=== STEP4b(iii) A<-B: same but rx-vlan-offload ON  (2026-09-19T13:44:45Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter+rxvlan]: vlan-filter=on rx-vlan-offload=on netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8108544 secs=5 pps=1621708
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8108568  rx_vport_unicast_packets=+8108544  rx_steer_missed_packets=+8108568  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4b(iv) A<-B: working state + isolate + VLAN rule  (2026-09-19T13:45:17Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fiso.txt
+blaster: sent=8333312 secs=5 pps=1666662
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8333336  rx_vport_unicast_packets=+8333312  rx_steer_missed_packets=+8333336  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4c A<-B: dv_flow_en=0 (verbs engine), promisc, no rule, filter on, no netdev  (2026-09-19T13:46:41Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1,dv_flow_en=0 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8132608 secs=5 pps=1626521
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8132632  rx_vport_unicast_packets=+8132608  rx_steer_missed_packets=+8132632  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4d A<-B: dv_flow_en=0 + isolate + VLAN rule  (2026-09-19T13:47:13Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1,dv_flow_en=0 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fiso.txt
+blaster: sent=7994880 secs=5 pps=1598976
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+7994904  rx_vport_unicast_packets=+7994880  rx_steer_missed_packets=+7994904  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4 on KERNEL 7.0.0-30  A<-B: working recipe (promisc, no rule, filter on, no netdev)  (2026-09-19T13:57:03Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8351232 secs=5 pps=1670246
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8351256  rx_vport_unicast_packets=+8351232  rx_steer_missed_packets=+8351256  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4e A<-B (kernel 7.0.0-30): dmfs + working recipe (promisc, no rule, filter on, no netdev)  (2026-09-19T13:59:20Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8031744 secs=5 pps=1606348
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8031768  rx_vport_unicast_packets=+8031744  rx_steer_missed_packets=+8031768  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4f A<-B: rdma-core DOWNGRADED to 50.0-2build2, working recipe  (2026-09-19T14:01:46Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8473088 secs=5 pps=1694617
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8473112  rx_vport_unicast_packets=+8473088  rx_steer_missed_packets=+8473112  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4g A<-B: DPDK 23.11-1build3 (noble base), rdma-core 2build2, kernel 7.0.0-30, working recipe  (2026-09-19T14:03:58Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8018432 secs=5 pps=1603686
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8018457  rx_vport_unicast_packets=+8018432  rx_steer_missed_packets=+8018457  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4h A<-B: DISTRO DPDK 23.11 (24.11 removed), kernel 7.0.0-30, rdma-core 2build2, working recipe  (2026-09-19T14:05:06Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev+filter-rxvlan]: vlan-filter=on rx-vlan-offload=off netdev=0
+cmd: /usr/bin/dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8429056 secs=5 pps=1685811
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8429081  rx_vport_unicast_packets=+8429056  rx_steer_missed_packets=+8429081  eno2_kernel_rx=+0  vlan_kernel_rx=+0
+=== STEP4i A<-B: same, rx-vlan-filter OFF  (2026-09-19T14:05:39Z)
+receiver=103.88.233.93 sender=103.88.233.111 state[nonetdev-filter-rxvlan]: vlan-filter=off rx-vlan-offload=off netdev=0
+cmd: /usr/bin/dpdk-testpmd -l 2-4 -n 4 -a 0000:c1:00.1 --file-prefix=lad -- -i --rxq=2 --txq=2 --nb-cores=2 --forward-mode=rxonly --cmdline-file=/tmp/fp.txt
+blaster: sent=8656896 secs=5 pps=1731379
+receiver says:   RX-packets: 0              RX-dropped: 0             RX-total: 0   RX-packets: 0              RX-dropped: 0             RX-total: 0 
+deltas: rx_packets_phy=+8656920  rx_vport_unicast_packets=+8656896  rx_steer_missed_packets=+24  eno2_kernel_rx=+8656896  vlan_kernel_rx=+0

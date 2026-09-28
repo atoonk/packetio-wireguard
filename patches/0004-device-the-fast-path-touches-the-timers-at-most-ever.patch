@@ -1,0 +1,145 @@
+From 8a29059211f007c696867319ce1f04e1f13fb656 Mon Sep 17 00:00:00 2001
+From: Andree Toonk <atoonk@gmail.com>
+Date: Sat, 19 Sep 2026 00:58:55 +0000
+Subject: [PATCH 4/4] device: the fast path touches the timers at most every 50
+ ms per peer
+
+(cherry picked from commit e643955d88b39c5949e1fba3fc5eebad5e526c74)
+(cherry picked from commit 33daac530e7ebf0674a81c726ac23b20d7980e5b)
+---
+ device/fastpath.go      | 26 +++++++++++++++++++
+ device/fastpath_test.go | 55 +++++++++++++++++++++++++++++++++++++++++
+ device/peer.go          |  3 +++
+ 3 files changed, 84 insertions(+)
+
+diff --git a/device/fastpath.go b/device/fastpath.go
+index a0121e5..a29eb67 100644
+--- a/device/fastpath.go
++++ b/device/fastpath.go
+@@ -245,6 +245,13 @@ func (peer *Peer) FastPathReceived(kp *Keypair, endpoint conn.Endpoint, packets
+ 		peer.SendStagedPackets()
+ 	}
+ 	peer.rxBytes.Add(dataBytes + uint64(packets)*MinMessageSize)
++	// The timers this feeds are on scales of seconds (keepalive 10 s, rekey
++	// 120 s, the handshake-retry window 5 s); touching them for every batch
++	// from every receive core is contended lock traffic for nothing. Once
++	// per fastPathTimerInterval per peer is indistinguishable to them.
++	if !peer.fastPathDue(&peer.fastPathRxAt) {
++		return
++	}
+ 	peer.SetEndpointFromPacket(endpoint)
+ 	peer.keepKeyFreshReceiving()
+ 	peer.timersAnyAuthenticatedPacketTraversal()
+@@ -254,6 +261,22 @@ func (peer *Peer) FastPathReceived(kp *Keypair, endpoint conn.Endpoint, packets
+ 	}
+ }
+ 
++// fastPathTimerInterval is how often, per peer and per direction, the fast
++// path's batch reports touch the timers. The timers they touch fire after
++// seconds; the interval only shifts them by up to this much.
++const fastPathTimerInterval = 50 * time.Millisecond
++
++// fastPathDue reports whether the timers should be touched now, and claims
++// the slot if so. One atomic; no lock.
++func (peer *Peer) fastPathDue(last *atomic.Int64) bool {
++	now := time.Now().UnixNano()
++	prev := last.Load()
++	if now-prev < int64(fastPathTimerInterval) {
++		return false
++	}
++	return last.CompareAndSwap(prev, now)
++}
++
+ // FastPathSent reports a batch of transport packets the fast path encrypted
+ // and transmitted itself. It mirrors RoutineSequentialSender's bookkeeping
+ // after SendBuffers: byte counters, the sent timers and the rekey check.
+@@ -263,6 +286,9 @@ func (peer *Peer) FastPathSent(packets int, wireBytes uint64, anyData bool) {
+ 		return
+ 	}
+ 	peer.txBytes.Add(wireBytes)
++	if !peer.fastPathDue(&peer.fastPathTxAt) {
++		return
++	}
+ 	peer.timersAnyAuthenticatedPacketTraversal()
+ 	peer.timersAnyAuthenticatedPacketSent()
+ 	if anyData {
+diff --git a/device/fastpath_test.go b/device/fastpath_test.go
+index e01a296..87000c2 100644
+--- a/device/fastpath_test.go
++++ b/device/fastpath_test.go
+@@ -173,3 +173,58 @@ func TestValidateCountersBatch(t *testing.T) {
+ 		}
+ 	}
+ }
++
++// The fast path's send report still rekeys. This is the check that patch
++// 0004 (timers touched at most every fastPathTimerInterval) earns its
++// place honestly: throttling the bookkeeping must delay the rekey by at
++// most that interval, never skip it.
++func TestFastPathSentStillRekeys(t *testing.T) {
++	pair := genTestPair(t, false)
++	defer pair[0].dev.Close()
++	defer pair[1].dev.Close()
++	done := make(chan struct{})
++	pair.Send(t, Ping, done)
++	close(done)
++
++	var peer *Peer
++	for _, p := range pair[0].dev.peers.keyMap {
++		peer = p
++	}
++	if peer == nil {
++		t.Fatal("no peer")
++	}
++	kp := peer.keypairs.Current()
++	if kp == nil {
++		t.Fatal("no keypair after a handshake")
++	}
++	sentAt := func() time.Time {
++		peer.handshake.mutex.RLock()
++		defer peer.handshake.mutex.RUnlock()
++		return peer.handshake.lastSentHandshake
++	}
++
++	// Claim this interval's slot, so the next report is throttled.
++	peer.FastPathSent(1, 100, true)
++	before := sentAt()
++
++	// Now the session runs out of nonces. The very next report is inside
++	// the interval, so it must not touch the timers at all.
++	kp.sendNonce.Store(RekeyAfterMessages + 1)
++	peer.FastPathSent(1, 100, true)
++	if !sentAt().Equal(before) {
++		t.Fatal("a report inside the interval touched the timers")
++	}
++
++	// Past the interval the next batch must notice and start a handshake.
++	// Give the retry timer room too: SendHandshakeInitiation refuses one
++	// within RekeyTimeout of the last.
++	peer.handshake.mutex.Lock()
++	peer.handshake.lastSentHandshake = time.Now().Add(-RekeyTimeout - time.Second)
++	peer.handshake.mutex.Unlock()
++	before = sentAt()
++	time.Sleep(fastPathTimerInterval + 10*time.Millisecond)
++	peer.FastPathSent(1, 100, true)
++	if got := sentAt(); !got.After(before) {
++		t.Fatalf("no handshake after the interval passed with the nonces spent (last sent %v, was %v)", got, before)
++	}
++}
+diff --git a/device/peer.go b/device/peer.go
+index 3a4ccbf..97f35e5 100644
+--- a/device/peer.go
++++ b/device/peer.go
+@@ -16,6 +16,9 @@ import (
+ )
+ 
+ type Peer struct {
++	// PACKETIO FORK: when the fast path last touched the timers, per direction.
++	fastPathRxAt, fastPathTxAt atomic.Int64
++
+ 	isRunning         atomic.Bool
+ 	keypairs          Keypairs
+ 	handshake         Handshake
+-- 
+2.43.0
+

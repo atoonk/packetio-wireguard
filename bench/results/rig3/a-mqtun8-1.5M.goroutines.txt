@@ -1,0 +1,143 @@
+goroutine profile: total 185
+48 @ 0x48ae2e 0x41b20e 0x41ad52 0x6dd305 0x492721
+#	0x6dd304	golang.zx2c4.com/wireguard/device.(*Device).RoutineDecryption+0x184	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/receive.go:244
+
+48 @ 0x48ae2e 0x41b20e 0x41ad52 0x6dd6e5 0x492721
+#	0x6dd6e4	golang.zx2c4.com/wireguard/device.(*Device).RoutineHandshake+0x164	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/receive.go:278
+
+47 @ 0x48ae2e 0x41b20e 0x41ad52 0x6e14cf 0x492721
+#	0x6e14ce	golang.zx2c4.com/wireguard/device.(*Device).RoutineEncryption+0x18e	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/send.go:446
+
+8 @ 0x48ae2e 0x41b20e 0x41ad52 0x710d0f 0x492721
+#	0x710d0e	github.com/atoonk/packetio-wireguard/internal/mqtun.(*Device).writer+0xae	github.com/atoonk/packetio-wireguard/internal/mqtun/mqtun.go:166
+
+8 @ 0x4cc3c5 0x4cae78 0x4e4b3d 0x4e4b25 0x4e4a61 0x4e9baf 0x4e9baa 0x710a0d 0x492721
+#	0x4cc3c4	syscall.Syscall+0x24								syscall/syscall_linux.go:74
+#	0x4cae77	syscall.read+0x37								syscall/zsyscall_linux_amd64.go:736
+#	0x4e4b3c	syscall.Read+0x21c								syscall/syscall_unix.go:183
+#	0x4e4b24	internal/poll.ignoringEINTRIO+0x204						internal/poll/fd_unix.go:738
+#	0x4e4a60	internal/poll.(*FD).Read+0x140							internal/poll/fd_unix.go:161
+#	0x4e9bae	os.(*File).read+0x4e								os/file_posix.go:29
+#	0x4e9ba9	os.(*File).Read+0x49								os/file.go:144
+#	0x710a0c	github.com/atoonk/packetio-wireguard/internal/mqtun.(*Device).reader+0xec	github.com/atoonk/packetio-wireguard/internal/mqtun/mqtun.go:139
+
+7 @ 0x70a215 0x70ab66 0x706ada 0x6dc467 0x492721
+#	0x70a214	github.com/atoonk/packetio-wireguard/internal/gateway.(*Gateway).generate+0x994	github.com/atoonk/packetio-wireguard/internal/gateway/gen.go:79
+#	0x70ab65	github.com/atoonk/packetio-wireguard/internal/gateway.(*Gateway).receive+0x745	github.com/atoonk/packetio-wireguard/internal/gateway/rx.go:104
+#	0x706ad9	github.com/atoonk/packetio-wireguard/internal/gateway.(*Bind).Open.func1+0x79	github.com/atoonk/packetio-wireguard/internal/gateway/bind.go:54
+#	0x6dc466	golang.zx2c4.com/wireguard/device.(*Device).RoutineReceiveIncoming+0x3e6	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/receive.go:110
+
+1 @ 0x421669 0x48d0d8 0x6abdd3 0x492721
+#	0x48d0d7	os/signal.signal_recv+0x97	runtime/sigqueue.go:152
+#	0x6abdd2	os/signal.loop+0x12		os/signal/signal_unix.go:23
+
+1 @ 0x449971 0x489c5d 0x68fa71 0x68f8a5 0x68c729 0x6a68ca 0x6a735a 0x669809 0x66b5a7 0x6719ce 0x667c70 0x492721
+#	0x68fa70	runtime/pprof.writeRuntimeProfile+0xb0	runtime/pprof/pprof.go:851
+#	0x68f8a4	runtime/pprof.writeGoroutine+0x44	runtime/pprof/pprof.go:784
+#	0x68c728	runtime/pprof.(*Profile).WriteTo+0x148	runtime/pprof/pprof.go:408
+#	0x6a68c9	net/http/pprof.handler.ServeHTTP+0x529	net/http/pprof/pprof.go:273
+#	0x6a7359	net/http/pprof.Index+0xd9		net/http/pprof/pprof.go:397
+#	0x669808	net/http.HandlerFunc.ServeHTTP+0x28	net/http/server.go:2286
+#	0x66b5a6	net/http.(*ServeMux).ServeHTTP+0x1c6	net/http/server.go:2828
+#	0x6719cd	net/http.serverHandler.ServeHTTP+0x8d	net/http/server.go:3311
+#	0x667c6f	net/http.(*conn).serve+0x64f		net/http/server.go:2073
+
+1 @ 0x452c54 0x49384b 0x6defbb 0x6e0612 0x492721
+#	0x6defba	golang.zx2c4.com/wireguard/device.(*Device).NewOutboundElement+0x5a	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/send.go:62
+#	0x6e0611	golang.zx2c4.com/wireguard/device.(*Device).RoutineReadFromTUN+0x611	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/send.go:281
+
+1 @ 0x48ae2e 0x41b20e 0x41ad52 0x6de437 0x492721
+#	0x6de436	golang.zx2c4.com/wireguard/device.(*Peer).RoutineSequentialReceiver+0x176	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/receive.go:439
+
+1 @ 0x48ae2e 0x41b20e 0x41ad52 0x6e42f9 0x492721
+#	0x6e42f8	golang.zx2c4.com/wireguard/device.(*Device).RoutineTUNEventReader+0x78	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/tun.go:19
+
+1 @ 0x48ae2e 0x44ce57 0x48a005 0x4e3d87 0x4e56ec 0x4e56da 0x548849 0x5597fb 0x558bf0 0x66c94c 0x66c532 0x7186dc 0x718678 0x492721
+#	0x48a004	internal/poll.runtime_pollWait+0x84		runtime/netpoll.go:351
+#	0x4e3d86	internal/poll.(*pollDesc).wait+0x26		internal/poll/fd_poll_runtime.go:84
+#	0x4e56eb	internal/poll.(*pollDesc).waitRead+0x28b	internal/poll/fd_poll_runtime.go:89
+#	0x4e56d9	internal/poll.(*FD).Accept+0x279		internal/poll/fd_unix.go:613
+#	0x548848	net.(*netFD).accept+0x28			net/fd_unix.go:150
+#	0x5597fa	net.(*TCPListener).accept+0x1a			net/tcpsock_posix.go:159
+#	0x558bef	net.(*TCPListener).Accept+0x2f			net/tcpsock.go:387
+#	0x66c94b	net/http.(*Server).Serve+0x30b			net/http/server.go:3434
+#	0x66c531	net/http.(*Server).ListenAndServe+0x71		net/http/server.go:3360
+#	0x7186db	net/http.ListenAndServe+0x7b			net/http/server.go:3675
+#	0x718677	main.run.func1+0x17				github.com/atoonk/packetio-wireguard/cmd/wgpio/main.go:290
+
+1 @ 0x48ae2e 0x44ce57 0x48a005 0x4e3d87 0x4e56ec 0x4e56da 0x548849 0x55c3d6 0x55b330 0x6ceb83 0x492721
+#	0x48a004	internal/poll.runtime_pollWait+0x84			runtime/netpoll.go:351
+#	0x4e3d86	internal/poll.(*pollDesc).wait+0x26			internal/poll/fd_poll_runtime.go:84
+#	0x4e56eb	internal/poll.(*pollDesc).waitRead+0x28b		internal/poll/fd_poll_runtime.go:89
+#	0x4e56d9	internal/poll.(*FD).Accept+0x279			internal/poll/fd_unix.go:613
+#	0x548848	net.(*netFD).accept+0x28				net/fd_unix.go:150
+#	0x55c3d5	net.(*UnixListener).accept+0x15				net/unixsock_posix.go:172
+#	0x55b32f	net.(*UnixListener).Accept+0x2f				net/unixsock.go:267
+#	0x6ceb82	golang.zx2c4.com/wireguard/ipc.UAPIListen.func2+0x62	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/ipc/uapi_linux.go:119
+
+1 @ 0x48ae2e 0x467ac5 0x6c4011 0x492721
+#	0x6c4010	golang.zx2c4.com/wireguard/ratelimiter.(*Ratelimiter).Init.func1+0x90	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/ratelimiter/ratelimiter.go:68
+
+1 @ 0x48ae2e 0x467ac5 0x6ce685 0x7184c2 0x492721
+#	0x6ce684	golang.zx2c4.com/wireguard/ipc.(*UAPIListener).Accept+0x64	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/ipc/uapi_linux.go:26
+#	0x7184c1	main.run.func3+0x61						github.com/atoonk/packetio-wireguard/cmd/wgpio/main.go:388
+
+1 @ 0x48ae2e 0x467ac5 0x7060a9 0x492721
+#	0x7060a8	github.com/atoonk/packetio-wireguard/internal/gateway.(*resolver).run+0xe8	github.com/atoonk/packetio-wireguard/internal/gateway/arp.go:56
+
+1 @ 0x48ae2e 0x467ac5 0x717e7b 0x713c91 0x454315 0x492721
+#	0x717e7a	main.run+0x387a		github.com/atoonk/packetio-wireguard/cmd/wgpio/main.go:412
+#	0x713c90	main.main+0xef0		github.com/atoonk/packetio-wireguard/cmd/wgpio/main.go:141
+#	0x454314	runtime.main+0x2d4	runtime/proc.go:290
+
+1 @ 0x48ae2e 0x468952 0x468929 0x48c385 0x499d1d 0x6e1a45 0x6e1a27 0x6e1a26 0x492721
+#	0x48c384	internal/sync.runtime_SemacquireMutex+0x24				runtime/sema.go:95
+#	0x499d1c	internal/sync.(*Mutex).lockSlow+0x15c					internal/sync/mutex.go:149
+#	0x6e1a44	internal/sync.(*Mutex).Lock+0x1c4					internal/sync/mutex.go:70
+#	0x6e1a26	sync.(*Mutex).Lock+0x1a6						sync/mutex.go:46
+#	0x6e1a25	golang.zx2c4.com/wireguard/device.(*Peer).RoutineSequentialSender+0x1a5	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/send.go:508
+
+1 @ 0x48ae2e 0x468952 0x468929 0x48c4ae 0x49b5c5 0x6d1465 0x492721
+#	0x48c4ad	sync.runtime_SemacquireWaitGroup+0x2d				runtime/sema.go:114
+#	0x49b5c4	sync.(*WaitGroup).Wait+0x84					sync/waitgroup.go:206
+#	0x6d1464	golang.zx2c4.com/wireguard/device.newOutboundQueue.func1+0x24	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/channels.go:32
+
+1 @ 0x48ae2e 0x468952 0x468929 0x48c4ae 0x49b5c5 0x6d1565 0x492721
+#	0x48c4ad	sync.runtime_SemacquireWaitGroup+0x2d				runtime/sema.go:114
+#	0x49b5c4	sync.(*WaitGroup).Wait+0x84					sync/waitgroup.go:206
+#	0x6d1564	golang.zx2c4.com/wireguard/device.newInboundQueue.func1+0x24	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/channels.go:50
+
+1 @ 0x48ae2e 0x468952 0x468929 0x48c4ae 0x49b5c5 0x6d1665 0x492721
+#	0x48c4ad	sync.runtime_SemacquireWaitGroup+0x2d				runtime/sema.go:114
+#	0x49b5c4	sync.(*WaitGroup).Wait+0x84					sync/waitgroup.go:206
+#	0x6d1664	golang.zx2c4.com/wireguard/device.newHandshakeQueue.func1+0x24	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/channels.go:68
+
+1 @ 0x4cc3c5 0x4cae78 0x4e4b3d 0x4e4b25 0x4e4a61 0x547905 0x551ae5 0x661933 0x492721
+#	0x4cc3c4	syscall.Syscall+0x24				syscall/syscall_linux.go:74
+#	0x4cae77	syscall.read+0x37				syscall/zsyscall_linux_amd64.go:736
+#	0x4e4b3c	syscall.Read+0x21c				syscall/syscall_unix.go:183
+#	0x4e4b24	internal/poll.ignoringEINTRIO+0x204		internal/poll/fd_unix.go:738
+#	0x4e4a60	internal/poll.(*FD).Read+0x140			internal/poll/fd_unix.go:161
+#	0x547904	net.(*netFD).Read+0x24				net/fd_posix.go:68
+#	0x551ae4	net.(*conn).Read+0x44				net/net.go:196
+#	0x661932	net/http.(*connReader).backgroundRead+0x32	net/http/server.go:702
+
+1 @ 0x4cc459 0x6c1132 0x6befd8 0x6bf0aa 0x6c482a 0x6c49f3 0x6ced09 0x492721
+#	0x4cc458	syscall.Syscall6+0x38						syscall/syscall_linux.go:96
+#	0x6c1131	golang.org/x/sys/unix.ppoll+0x51				golang.org/x/sys@v0.48.0/unix/zsyscall_linux.go:138
+#	0x6befd7	golang.org/x/sys/unix.Ppoll+0x37				golang.org/x/sys@v0.48.0/unix/syscall_linux.go:158
+#	0x6bf0a9	golang.org/x/sys/unix.Poll+0x89					golang.org/x/sys@v0.48.0/unix/syscall_linux.go:167
+#	0x6c4829	golang.zx2c4.com/wireguard/rwcancel.(*RWCancel).ReadyRead+0x69	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/rwcancel/rwcancel.go:51
+#	0x6c49f2	golang.zx2c4.com/wireguard/rwcancel.(*RWCancel).Read+0x72	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/rwcancel/rwcancel.go:91
+#	0x6ced08	golang.zx2c4.com/wireguard/ipc.UAPIListen.func1+0xe8		golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/ipc/uapi_linux.go:107
+
+1 @ 0x6b313b 0x6e1723 0x492721
+#	0x6b313a	golang.org/x/crypto/chacha20poly1305.(*chacha20poly1305).Seal+0xda	golang.org/x/crypto@v0.37.0/chacha20poly1305/chacha20poly1305.go:57
+#	0x6e1722	golang.zx2c4.com/wireguard/device.(*Device).RoutineEncryption+0x3e2	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/send.go:466
+
+1 @ 0x70231d 0x70a848 0x706ada 0x6dc467 0x492721
+#	0x70231c	github.com/atoonk/packetio/mlx5.(*RxQueue).Fill+0x37c				github.com/atoonk/packetio@v0.1.11/mlx5/rxqueue.go:192
+#	0x70a847	github.com/atoonk/packetio-wireguard/internal/gateway.(*Gateway).receive+0x427	github.com/atoonk/packetio-wireguard/internal/gateway/rx.go:75
+#	0x706ad9	github.com/atoonk/packetio-wireguard/internal/gateway.(*Bind).Open.func1+0x79	github.com/atoonk/packetio-wireguard/internal/gateway/bind.go:54
+#	0x6dc466	golang.zx2c4.com/wireguard/device.(*Device).RoutineReceiveIncoming+0x3e6	golang.zx2c4.com/wireguard@v0.0.0-20260522210424-ecfc5a8d5446/device/receive.go:110
+

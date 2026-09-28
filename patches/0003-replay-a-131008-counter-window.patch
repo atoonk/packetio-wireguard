@@ -1,0 +1,75 @@
+From fd87408b2bd4485d14646bb9d8ace3c9cf5ecf79 Mon Sep 17 00:00:00 2001
+From: Andree Toonk <atoonk@gmail.com>
+Date: Sat, 19 Sep 2026 00:48:58 +0000
+Subject: [PATCH 3/4] replay: a 131008-counter window
+
+(cherry picked from commit 3cfc354df021c1c01352dc251c9854e1ca8bfc8b)
+(cherry picked from commit 898731abc3a53801008673299a174afc97322d86)
+---
+ device/fastpath.go      |  5 +++--
+ device/fastpath_test.go |  6 +++---
+ replay/replay.go        | 15 +++++++++++----
+ 3 files changed, 17 insertions(+), 9 deletions(-)
+
+diff --git a/device/fastpath.go b/device/fastpath.go
+index 2d0f848..a0121e5 100644
+--- a/device/fastpath.go
++++ b/device/fastpath.go
+@@ -38,8 +38,9 @@ package device
+ //     still sends on the same keypair (keepalives, staged packets), and a
+ //     nonce used twice under one key breaks the cipher.
+ //   - Sending in parallel from several goroutines reorders the counter on
+-//     the wire; the receiver's window is 8128 counters wide. Keep
+-//     goroutines x batch well under that, and one FIFO per peer per
++//     the wire; the receiver's window is 131008 counters wide (windowSize
++//     in the replay package). Keep goroutines x batch well under that, and
++//     one FIFO per peer per
+ //     goroutine to the NIC.
+ //   - Call FastPathReceived and FastPathSent once per batch. Without them the
+ //     session never rekeys and dies at RejectAfterTime, slowly.
+diff --git a/device/fastpath_test.go b/device/fastpath_test.go
+index aa3a6d8..e01a296 100644
+--- a/device/fastpath_test.go
++++ b/device/fastpath_test.go
+@@ -105,9 +105,9 @@ func TestValidateCounterConcurrent(t *testing.T) {
+ 	}
+ }
+ 
+-// The window is 8128 wide; a validator running far ahead can legitimately
+-// push a few of the other's counters out of it.
+-const windowSlack = 8192
++// A validator running far ahead can legitimately push a few of the other's
++// counters out of the window, which is 131008 counters wide.
++const windowSlack = 131072
+ 
+ // The observer sees a keypair come and go: established on both sides,
+ // promoted on the responder, retired when the devices close.
+diff --git a/replay/replay.go b/replay/replay.go
+index 46e224d..ce426f6 100644
+--- a/replay/replay.go
++++ b/replay/replay.go
+@@ -11,10 +11,17 @@ type block uint64
+ const (
+ 	blockBitLog = 6                // 1<<6 == 64 bits
+ 	blockBits   = 1 << blockBitLog // must be power of 2
+-	ringBlocks  = 1 << 7           // must be power of 2
+-	windowSize  = (ringBlocks - 1) * blockBits
+-	blockMask   = ringBlocks - 1
+-	bitMask     = blockBits - 1
++	// PACKETIO FORK: 1<<11 blocks, a window of 131008 counters (16 KiB per
++	// keypair) instead of upstream's 1<<7 (8128 counters, 1 KiB). The
++	// window is a receiver-local tolerance for reordering, not a security
++	// parameter: every counter is still accepted at most once. With several
++	// receive queues decrypting one keypair in parallel at tens of millions
++	// of packets per second, 8128 counters is a few hundred microseconds of
++	// stream, and a queue that lags another by that much loses everything.
++	ringBlocks = 1 << 11 // must be power of 2
++	windowSize = (ringBlocks - 1) * blockBits
++	blockMask  = ringBlocks - 1
++	bitMask    = blockBits - 1
+ )
+ 
+ // A Filter rejects replayed messages by checking if message counter value is
+-- 
+2.43.0
+

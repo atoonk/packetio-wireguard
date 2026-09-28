@@ -1,0 +1,1162 @@
+From 71ccb17887536e6ed87e80f59494a4b8bcd7f0b4 Mon Sep 17 00:00:00 2001
+From: Andree Toonk <atoonk@gmail.com>
+Date: Fri, 18 Sep 2026 23:11:22 +0000
+Subject: [PATCH 1/4] device: expose transport keypairs for an inline fast path
+
+A forwarding plane that owns its NIC receives a transport message in a DMA frame and
+would like to decrypt it there, on the same goroutine, and transmit from there. Routing
+every packet through this package's pipeline instead costs a copy into a pooled buffer,
+three goroutine hand-offs and two channel operations, and above ~1.3 Mpps the single
+RoutineReadFromTUN goroutine is the ceiling however many receive queues feed it.
+
+This exposes the minimum such a caller needs: the negotiated transport state as
+constructed AEADs and indices, never key bytes; a replay check safe against this
+package's own receive path; a nonce reservation that cannot collide with this package's
+own sends; the per-batch liveness calls that keep rekeying and timers working; and a
+keypair-lifecycle observer so the caller can keep a receiver-index table. The handshake,
+timers, cookies, rate limiting, roaming and configuration all stay here.
+
+The replay window takes a mutex, unconditionally. Upstream keeps the window safe by
+validating each keypair from one goroutine; once a keypair can be reached from outside
+this package that is no longer enough, and two unsynchronised updates to one ring block
+lose each other's bit, which makes an already-seen counter look new. ReserveNonces is a
+compare-and-swap that never advances past RejectAfterMessages, because an unconditional
+add would leave only 2^13 counts before the counter wrapped and low nonces were reused
+under the same key.
+
+PeerPublicKey deliberately takes no lock. The observer runs with the peer's keypairs
+lock held and, from BeginSymmetricSession, its handshake mutex, so any method that takes
+either would deadlock the device if the callback called it; remoteStatic is written once
+in NewPeer and never again, so this one is safe and the contract says which are not.
+
+Ten tests, five of them adversarial: nonce uniqueness with compare-and-swap reservers
+racing this package's own adders near the limit, the replay window accepting each
+counter exactly once under eight validators, which slot an established keypair lands in
+per role, an expired keypair refusing both gates of the sender, and which locks are held
+when the observer runs. Each fails when the guard it targets is removed.
+---
+ device/device.go                    |   3 +
+ device/fastpath.go                  | 290 ++++++++++++++++++++++
+ device/fastpath_adversarial_test.go | 362 ++++++++++++++++++++++++++++
+ device/fastpath_keypair_test.go     | 175 ++++++++++++++
+ device/fastpath_test.go             | 162 +++++++++++++
+ device/keypair.go                   |  12 +
+ device/noise-protocol.go            |   5 +
+ device/peer.go                      |   3 +
+ device/receive.go                   |   3 +-
+ 9 files changed, 1014 insertions(+), 1 deletion(-)
+ create mode 100644 device/fastpath.go
+ create mode 100644 device/fastpath_adversarial_test.go
+ create mode 100644 device/fastpath_keypair_test.go
+ create mode 100644 device/fastpath_test.go
+
+diff --git a/device/device.go b/device/device.go
+index 6854ed8..69b1534 100644
+--- a/device/device.go
++++ b/device/device.go
+@@ -18,6 +18,9 @@ import (
+ )
+ 
+ type Device struct {
++	// PACKETIO FORK: observes transport-keypair lifecycle; nil unless set.
++	keypairObserver atomic.Pointer[KeypairObserver]
++
+ 	state struct {
+ 		// state holds the device's state. It is accessed atomically.
+ 		// Use the device.deviceState method to read it.
+diff --git a/device/fastpath.go b/device/fastpath.go
+new file mode 100644
+index 0000000..6cc29f6
+--- /dev/null
++++ b/device/fastpath.go
+@@ -0,0 +1,290 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
++ */
++
++package device
++
++// PACKETIO FORK. Everything in this file is an addition; nothing upstream
++// changes behaviour unless a keypair observer is installed, except that
++// replay validation takes a mutex once a keypair can be reached from
++// outside this package (see Keypair.validateCounter).
++//
++// Purpose. A forwarding plane that owns its NIC receives a transport
++// message in a DMA frame and would like to decrypt it there, on the same
++// goroutine, and hand the plaintext straight to its transmit ring -- and
++// likewise encrypt a plaintext frame in place and transmit it. Routing every
++// packet through this package's pipeline instead (RoutineReceiveIncoming ->
++// RoutineDecryption -> RoutineSequentialReceiver, and the mirror on the send
++// side) costs a copy into a pooled buffer, three goroutine hand-offs and two
++// channel operations per packet, and above ~1.3 Mpps the single
++// RoutineReadFromTUN goroutine is the ceiling however many receive queues
++// feed it.
++//
++// What this file exposes is the minimum such a fast path needs: the
++// negotiated transport state (as constructed AEADs, never key bytes), a
++// replay check that is safe against this package's own receive path, a nonce
++// reservation that cannot collide with this package's own sends, and the
++// per-batch liveness calls that keep rekeying and timers working. The
++// handshake, timers, cookies, rate limiting, roaming and configuration all
++// stay here, untouched.
++//
++// Safety rules a caller must keep, each of which was a real bug somewhere:
++//
++//   - A keypair may be validated by this package AND the fast path at the
++//     same time (a packet the fast path punts, a handshake, a keepalive), so
++//     ValidateCounter serialises. Never bypass it with a private window.
++//   - Every nonce the fast path sends comes from ReserveNonces. This package
++//     still sends on the same keypair (keepalives, staged packets), and a
++//     nonce used twice under one key breaks the cipher.
++//   - Sending in parallel from several goroutines reorders the counter on
++//     the wire; the receiver's window is 8128 counters wide. Keep
++//     goroutines x batch well under that, and one FIFO per peer per
++//     goroutine to the NIC.
++//   - Call FastPathReceived and FastPathSent once per batch. Without them the
++//     session never rekeys and dies at RejectAfterTime, slowly.
++//   - A keypair reported Retired must be dropped at once, whatever Expired
++//     says.
++
++import (
++	"crypto/cipher"
++	"net/netip"
++	"sync/atomic"
++	"time"
++
++	"golang.zx2c4.com/wireguard/conn"
++)
++
++// KeypairEvent says what happened to a transport keypair.
++type KeypairEvent int
++
++const (
++	// KeypairEstablished: a handshake produced this keypair. For the
++	// responder it is the "next" keypair until the initiator's first data
++	// packet confirms it; it may already be used to receive.
++	KeypairEstablished KeypairEvent = iota
++	// KeypairPromoted: the responder received its first authenticated data
++	// packet on a "next" keypair, which is now "current" and may be used to
++	// send.
++	KeypairPromoted
++	// KeypairRetired: the keypair was rotated out, expired, or flushed. The
++	// fast path must stop using it now. A receive turn already in flight may
++	// finish the batch it holds, which is the same window this package has
++	// between its own index lookup and its decryption workers.
++	KeypairRetired
++)
++
++// KeypairObserver sees the lifecycle of every transport keypair, so a fast
++// path can keep its own receiver-index table.
++//
++// It runs with this package's locks held: always the peer's keypairs lock,
++// and from BeginSymmetricSession also the peer's handshake mutex; on
++// retirement possibly from the receive path itself. So it must be cheap,
++// must not block, and must not call anything that takes either lock. That
++// rules out FastPathSendKeypair, FastPathReceived, FastPathSent and every
++// Device method. PeerPublicKey is safe and takes no lock; so do the Keypair
++// accessors (LocalIndex, RemoteIndex, ReceiveCipher, SendCipher, Expired).
++// Calling a forbidden one deadlocks the device: Go will not grant a read
++// lock to a goroutine already holding the write lock.
++//
++// The peer may be nil on KeypairRetired, if the keypair's index has already
++// left the table. It does not replay existing keypairs: install it before
++// peers are configured.
++type KeypairObserver func(peer *Peer, kp *Keypair, ev KeypairEvent)
++
++// SetKeypairObserver installs the observer, or removes it with nil.
++func (device *Device) SetKeypairObserver(f KeypairObserver) {
++	if f == nil {
++		device.keypairObserver.Store(nil)
++		return
++	}
++	device.keypairObserver.Store(&f)
++}
++
++func (device *Device) notifyKeypair(peer *Peer, kp *Keypair, ev KeypairEvent) {
++	if kp == nil {
++		return
++	}
++	if f := device.keypairObserver.Load(); f != nil {
++		(*f)(peer, kp, ev)
++	}
++}
++
++// ReceiveCipher decrypts transport messages from the peer.
++func (kp *Keypair) ReceiveCipher() cipher.AEAD { return kp.receive }
++
++// SendCipher encrypts transport messages to the peer.
++func (kp *Keypair) SendCipher() cipher.AEAD { return kp.send }
++
++// LocalIndex is the receiver index the peer puts in messages to us: what a
++// fast path demultiplexes on.
++func (kp *Keypair) LocalIndex() uint32 { return kp.localIndex }
++
++// RemoteIndex is the receiver index to put in messages to the peer.
++func (kp *Keypair) RemoteIndex() uint32 { return kp.remoteIndex }
++
++// Expired reports whether the keypair is past RejectAfterTime. The fast
++// path must check it before every use, as RoutineReceiveIncoming and
++// SendStagedPackets do.
++func (kp *Keypair) Expired() bool {
++	return time.Since(kp.created) >= RejectAfterTime
++}
++
++// ValidateCounter runs the anti-replay window for a received counter, after
++// the message has been authenticated (never before: the counter is
++// cleartext). It is safe against this package validating the same keypair
++// concurrently.
++func (kp *Keypair) ValidateCounter(counter uint64) bool {
++	return kp.validateCounter(counter)
++}
++
++// validateCounter is the one entry to the replay window. The window itself
++// is unsynchronised; upstream keeps it safe by validating each keypair from
++// its peer's single sequential receiver. Once a keypair can be reached from
++// outside this package that is no longer enough -- the same keypair is
++// validated here for punted packets and there for the rest -- and two
++// unsynchronised updates to one ring block lose each other's bit, which
++// makes an already-seen counter look new: a replay accepted.
++//
++// So the lock is unconditional. An earlier version took it only for keypairs
++// marked reachable, which was the same thing in practice (every keypair the
++// index table can hand out is reachable) while making the most
++// security-critical line in this fork depend on a flag an upstream merge
++// could displace. The lock is uncontended on the stock path and amortised on
++// the fast path, which validates a batch under one acquisition.
++func (kp *Keypair) validateCounter(counter uint64) bool {
++	kp.replayMu.Lock()
++	ok := kp.replayFilter.ValidateCounter(counter, RejectAfterMessages)
++	kp.replayMu.Unlock()
++	return ok
++}
++
++// ReserveNonces takes n consecutive send nonces and returns the first. ok is
++// false when the keypair is expired or has no budget left, in which case the
++// caller must not send on it (SendStagedPackets in that state starts a new
++// handshake). Reserved nonces that are never sent are harmless; the
++// receiver's window tolerates gaps.
++//
++// The reservation is a compare-and-swap that never advances past
++// RejectAfterMessages. An unconditional Add would: there are only 2^13
++// counts between RejectAfterMessages and 2^64, a caller retrying after
++// ok=false would push the counter through them, it would wrap, and low
++// nonces would be handed out a second time under the same key.
++func (kp *Keypair) ReserveNonces(n uint64) (start uint64, ok bool) {
++	if n == 0 || n > RejectAfterMessages || kp.Expired() {
++		return 0, false
++	}
++	for {
++		cur := kp.sendNonce.Load()
++		if cur >= RejectAfterMessages || RejectAfterMessages-cur < n {
++			kp.sendNonce.Store(RejectAfterMessages)
++			return 0, false
++		}
++		if kp.sendNonce.CompareAndSwap(cur, cur+n) {
++			return cur, true
++		}
++	}
++}
++
++// FastPathSendKeypair is the keypair to encrypt with right now, or nil when
++// this package itself would refuse to send (no keypair, budget exhausted,
++// expired, peer stopped). nil means: hand the packet to the normal path,
++// which also starts the handshake that fixes it. The guard is the one in
++// SendStagedPackets.
++func (peer *Peer) FastPathSendKeypair() *Keypair {
++	if peer == nil || !peer.isRunning.Load() || !peer.device.isUp() {
++		return nil
++	}
++	kp := peer.keypairs.Current()
++	if kp == nil || kp.sendNonce.Load() >= RejectAfterMessages || kp.Expired() {
++		return nil
++	}
++	return kp
++}
++
++// FastPathEndpoint is where to send to the peer: its current endpoint, as
++// SendBuffers would use, or nil when none is known.
++func (peer *Peer) FastPathEndpoint() conn.Endpoint {
++	peer.endpoint.Lock()
++	defer peer.endpoint.Unlock()
++	return peer.endpoint.val
++}
++
++// FastPathReceived reports a batch of transport packets the fast path has
++// authenticated and replay-checked itself, so the session stays alive. It
++// mirrors what RoutineSequentialReceiver does after decryption, minus the
++// packet handling: endpoint roaming, promotion of a "next" keypair, rekey
++// timers and byte counters. Call it once per batch.
++//
++//   - endpoint: where the batch came from; the peer's endpoint moves to it.
++//   - packets, dataBytes: how many authenticated packets, and their
++//     plaintext bytes in total (keepalives count as packets with 0 bytes).
++//   - anyData: whether any packet carried a payload.
++func (peer *Peer) FastPathReceived(kp *Keypair, endpoint conn.Endpoint, packets int, dataBytes uint64, anyData bool) {
++	if kp == nil || packets <= 0 {
++		return
++	}
++	if peer.ReceivedWithKeypair(kp) {
++		peer.SetEndpointFromPacket(endpoint)
++		peer.timersHandshakeComplete()
++		peer.SendStagedPackets()
++	}
++	peer.rxBytes.Add(dataBytes + uint64(packets)*MinMessageSize)
++	peer.SetEndpointFromPacket(endpoint)
++	peer.keepKeyFreshReceiving()
++	peer.timersAnyAuthenticatedPacketTraversal()
++	peer.timersAnyAuthenticatedPacketReceived()
++	if anyData {
++		peer.timersDataReceived()
++	}
++}
++
++// FastPathSent reports a batch of transport packets the fast path encrypted
++// and transmitted itself. It mirrors RoutineSequentialSender's bookkeeping
++// after SendBuffers: byte counters, the sent timers and the rekey check.
++// Call it once per batch, after the send.
++func (peer *Peer) FastPathSent(packets int, wireBytes uint64, anyData bool) {
++	if packets <= 0 {
++		return
++	}
++	peer.txBytes.Add(wireBytes)
++	peer.timersAnyAuthenticatedPacketTraversal()
++	peer.timersAnyAuthenticatedPacketSent()
++	if anyData {
++		peer.timersDataSent()
++	}
++	peer.keepKeyFreshSending()
++}
++
++// LookupPeerByIP is the cryptokey routing table: the peer allowed to use
++// ip, or nil. The fast path uses it as RoutineReadFromTUN does for a
++// packet's destination, and as RoutineSequentialReceiver does for a
++// decrypted packet's source (a packet whose source is not the peer's must
++// be dropped: authentication says who sent it, not which addresses it may
++// speak for).
++func (device *Device) LookupPeerByIP(ip netip.Addr) *Peer {
++	if ip.Is4() {
++		b := ip.As4()
++		return device.allowedips.Lookup(b[:])
++	}
++	b := ip.As16()
++	return device.allowedips.Lookup(b[:])
++}
++
++// PaddingSize is how many zero bytes to append to a plaintext of packetSize
++// bytes before encryption, for the device's MTU: the same rule as
++// RoutineEncryption, so packets look the same whichever path sent them.
++func (device *Device) PaddingSize(packetSize int) int {
++	return calculatePaddingSize(packetSize, int(device.tun.mtu.Load()))
++}
++
++// PeerPublicKey identifies the peer, for tables and logs. It takes no lock:
++// remoteStatic is written once, in NewPeer, before the peer is published,
++// and never again. That matters because this is the one method on Peer a
++// keypair observer may call from inside its callback -- see KeypairObserver,
++// which runs with the handshake mutex held.
++func (peer *Peer) PeerPublicKey() NoisePublicKey {
++	return peer.handshake.remoteStatic
++}
++
++var _ = atomic.Pointer[KeypairObserver]{}
+diff --git a/device/fastpath_adversarial_test.go b/device/fastpath_adversarial_test.go
+new file mode 100644
+index 0000000..506113d
+--- /dev/null
++++ b/device/fastpath_adversarial_test.go
+@@ -0,0 +1,362 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
++ */
++
++package device
++
++// PACKETIO FORK: adversarial tests for the fast-path API, written for the
++// security review of patch 0001. Each test targets one property the patch
++// claims and is built so that removing the guard makes it fail.
++
++import (
++	"math/rand"
++	"sync"
++	"testing"
++	"time"
++)
++
++// P2/P3. The fast path reserves nonces by compare-and-swap; this package's
++// own send path takes them by an unconditional Add and repairs the counter
++// afterwards (SendStagedPackets). Both run at once on one keypair, close to
++// the limit. No nonce may be handed out twice, none at or past
++// RejectAfterMessages may be usable, and the counter must end parked at the
++// limit rather than wrapped.
++func TestNoncesUniqueAcrossFastAndStockSenders(t *testing.T) {
++	kp := testKeypair(t)
++	const headroom = 20000
++	kp.sendNonce.Store(RejectAfterMessages - headroom)
++
++	var (
++		wg     sync.WaitGroup
++		mu     sync.Mutex
++		issued []uint64
++	)
++	// Six fast-path senders reserving random-sized batches.
++	for i := 0; i < 6; i++ {
++		wg.Add(1)
++		go func(seed int64) {
++			defer wg.Done()
++			r := rand.New(rand.NewSource(seed))
++			var mine []uint64
++			for {
++				n := uint64(1 + r.Intn(64))
++				start, ok := kp.ReserveNonces(n)
++				if !ok {
++					break
++				}
++				for k := uint64(0); k < n; k++ {
++					mine = append(mine, start+k)
++				}
++			}
++			mu.Lock()
++			issued = append(issued, mine...)
++			mu.Unlock()
++		}(int64(i))
++	}
++	// Four stock-path senders doing exactly what SendStagedPackets does.
++	for i := 0; i < 4; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			var mine []uint64
++			for tries := 0; tries < headroom; tries++ {
++				nonce := kp.sendNonce.Add(1) - 1
++				if nonce >= RejectAfterMessages {
++					kp.sendNonce.Store(RejectAfterMessages)
++					continue // upstream stages the packet for the next keypair
++				}
++				mine = append(mine, nonce)
++			}
++			mu.Lock()
++			issued = append(issued, mine...)
++			mu.Unlock()
++		}()
++	}
++	wg.Wait()
++
++	seen := make(map[uint64]bool, len(issued))
++	for _, n := range issued {
++		if n >= RejectAfterMessages {
++			t.Fatalf("nonce %d at or past the limit was handed out", n)
++		}
++		if seen[n] {
++			t.Fatalf("nonce %d handed out twice", n)
++		}
++		seen[n] = true
++	}
++	// ReserveNonces refuses a batch that does not fit whole and parks the
++	// counter at the limit, so the tail of the space, at most one batch
++	// less one, is never issued. That is a gap the receiver's window
++	// tolerates and a rekey a few packets early; it is not a reuse. Measure
++	// it and bound it, so a change that starts burning more is caught.
++	const maxBatch = 64
++	burned := headroom - len(seen)
++	t.Logf("%d of %d nonces below the limit were never issued (a partial final batch is refused whole)", burned, headroom)
++	if burned < 0 || burned >= maxBatch {
++		t.Fatalf("%d nonces unissued, want fewer than one batch (%d)", burned, maxBatch)
++	}
++	if got := kp.sendNonce.Load(); got != RejectAfterMessages {
++		t.Fatalf("counter at %d after exhaustion, want parked at %d", got, uint64(RejectAfterMessages))
++	}
++	if _, ok := kp.ReserveNonces(1); ok {
++		t.Fatal("a reservation succeeded after the space was spent")
++	}
++}
++
++// P1, with an oracle that does not depend on interleaving. Every counter in
++// [0, n) is presented three times, shuffled, across several validators at
++// once. n is far below the smallest replay window, so no legitimate counter
++// can ever fall out of the window however the goroutines interleave: the
++// only correct outcome is that each counter is accepted exactly once and
++// every counter is accepted. Removing replayMu from validateCounter makes
++// this fail with a counter accepted twice.
++func TestReplayWindowAcceptsEachCounterExactlyOnceUnderContention(t *testing.T) {
++	const (
++		n          = 4000 // well inside every window this fork has shipped
++		copies     = 3
++		validators = 8
++	)
++	kp := testKeypair(t)
++
++	work := make([]uint64, 0, n*copies)
++	for c := uint64(0); c < n; c++ {
++		for k := 0; k < copies; k++ {
++			work = append(work, c)
++		}
++	}
++	rand.New(rand.NewSource(1)).Shuffle(len(work), func(i, j int) { work[i], work[j] = work[j], work[i] })
++
++	accepted := make([][]uint64, validators)
++	var wg sync.WaitGroup
++	for v := 0; v < validators; v++ {
++		wg.Add(1)
++		go func(v int) {
++			defer wg.Done()
++			for i := v; i < len(work); i += validators {
++				if kp.ValidateCounter(work[i]) {
++					accepted[v] = append(accepted[v], work[i])
++				}
++			}
++		}(v)
++	}
++	wg.Wait()
++
++	times := make(map[uint64]int, n)
++	for _, a := range accepted {
++		for _, c := range a {
++			times[c]++
++		}
++	}
++	for c := uint64(0); c < n; c++ {
++		switch times[c] {
++		case 1:
++		case 0:
++			t.Fatalf("counter %d was never accepted, though it never left the window", c)
++		default:
++			t.Fatalf("counter %d accepted %d times: a replay got through", c, times[c])
++		}
++	}
++}
++
++// P7. The observer runs with this package's locks held. It must know which
++// locks, because two exported methods on Peer take them and would deadlock
++// if called from the callback. This test records, at every event, whether
++// the handshake mutex and the keypairs lock can be acquired for reading;
++// "cannot" means a call to PeerPublicKey (handshake.mutex) or
++// FastPathSendKeypair (keypairs) from that callback would hang the device.
++//
++// It does not itself call them: a deadlocked handshake would hang the whole
++// test binary at cleanup. TryRLock is the safe probe.
++func TestObserverRunsUnderTheHandshakeAndKeypairLocks(t *testing.T) {
++	pair := genTestPair(t, false)
++	type probe struct {
++		ev            KeypairEvent
++		handshakeFree bool
++		keypairsFree  bool
++	}
++	var (
++		mu     sync.Mutex
++		probes []probe
++	)
++	for i := range pair {
++		pair[i].dev.SetKeypairObserver(func(peer *Peer, kp *Keypair, ev KeypairEvent) {
++			p := probe{ev: ev}
++			if peer.handshake.mutex.TryRLock() {
++				peer.handshake.mutex.RUnlock()
++				p.handshakeFree = true
++			}
++			if peer.keypairs.TryRLock() {
++				peer.keypairs.RUnlock()
++				p.keypairsFree = true
++			}
++			mu.Lock()
++			probes = append(probes, p)
++			mu.Unlock()
++		})
++	}
++	done := make(chan struct{})
++	pair.Send(t, Ping, done)
++	pair.Send(t, Pong, done)
++	close(done)
++
++	mu.Lock()
++	defer mu.Unlock()
++	if len(probes) == 0 {
++		t.Fatal("no keypair events observed")
++	}
++	// The finding: keypairs is held at every event, and the handshake mutex
++	// at Established and at the retirements BeginSymmetricSession performs.
++	var heldHandshake, heldKeypairs int
++	for _, p := range probes {
++		if !p.handshakeFree {
++			heldHandshake++
++		}
++		if !p.keypairsFree {
++			heldKeypairs++
++		}
++	}
++	t.Logf("%d events: handshake mutex held during %d, keypairs lock held during %d",
++		len(probes), heldHandshake, heldKeypairs)
++	if heldKeypairs != len(probes) {
++		t.Errorf("expected the keypairs lock to be held at every event (it is what orders them); held at %d of %d",
++			heldKeypairs, len(probes))
++	}
++	if heldHandshake == 0 {
++		t.Errorf("expected the handshake mutex to be held at Established; it never was")
++	}
++}
++
++// P7, the fix for the above. A peer's public key never changes after
++// NewPeer, so PeerPublicKey need not take the handshake mutex, and an
++// observer that keys its table by public key must be able to call it. This
++// test does call it, from the callback, and requires the handshake to
++// complete. With the lock in PeerPublicKey this deadlocks; the timeout is
++// what reports it.
++func TestObserverMayCallPeerPublicKey(t *testing.T) {
++	pair := genTestPair(t, false)
++	var (
++		mu   sync.Mutex
++		keys = map[NoisePublicKey]int{}
++	)
++	for i := range pair {
++		pair[i].dev.SetKeypairObserver(func(peer *Peer, kp *Keypair, ev KeypairEvent) {
++			if ev != KeypairEstablished {
++				return
++			}
++			k := peer.PeerPublicKey()
++			mu.Lock()
++			keys[k]++
++			mu.Unlock()
++		})
++	}
++	finished := make(chan struct{})
++	go func() {
++		done := make(chan struct{})
++		pair.Send(t, Ping, done)
++		close(done)
++		close(finished)
++	}()
++	select {
++	case <-finished:
++	case <-time.After(5 * time.Second):
++		t.Fatal("handshake did not complete: PeerPublicKey deadlocks when called from the keypair observer")
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	if len(keys) != 2 {
++		t.Fatalf("observer saw %d distinct peer keys, want 2", len(keys))
++	}
++}
++
++// P4. A responder's new keypair is "next" until the initiator's first data
++// packet confirms it: it may receive, it must not send. FastPathSendKeypair
++// answers with Current, so the fast path can never send on it early; this
++// pins the slot each event finds the keypair in, on both sides, for both
++// roles.
++func TestEstablishedKeypairIsInTheSlotItsRoleRequires(t *testing.T) {
++	pair := genTestPair(t, false)
++	type obs struct {
++		ev                KeypairEvent
++		isInitiator       bool
++		inCurrent, inNext bool
++	}
++	var (
++		mu  sync.Mutex
++		got []obs
++	)
++	for i := range pair {
++		pair[i].dev.SetKeypairObserver(func(peer *Peer, kp *Keypair, ev KeypairEvent) {
++			// keypairs is held by the caller; read the slots directly.
++			o := obs{ev: ev, isInitiator: kp.isInitiator,
++				inCurrent: peer.keypairs.current == kp, inNext: peer.keypairs.next.Load() == kp}
++			mu.Lock()
++			got = append(got, o)
++			mu.Unlock()
++		})
++	}
++	done := make(chan struct{})
++	pair.Send(t, Ping, done)
++	pair.Send(t, Pong, done)
++	close(done)
++
++	mu.Lock()
++	defer mu.Unlock()
++	var checked int
++	for _, o := range got {
++		switch o.ev {
++		case KeypairEstablished:
++			checked++
++			if o.isInitiator && !o.inCurrent {
++				t.Errorf("initiator's keypair established but not current")
++			}
++			if !o.isInitiator && (o.inCurrent || !o.inNext) {
++				t.Errorf("responder's keypair established into current=%v next=%v; want next only", o.inCurrent, o.inNext)
++			}
++		case KeypairPromoted:
++			checked++
++			if !o.inCurrent || o.inNext {
++				t.Errorf("promoted keypair is current=%v next=%v; want current only", o.inCurrent, o.inNext)
++			}
++		}
++	}
++	if checked < 3 {
++		t.Fatalf("only %d establish/promote events seen", checked)
++	}
++}
++
++// P4. After ExpireCurrentKeypairs the device refuses to send on its
++// keypairs; so must the fast path, through both of its gates.
++func TestExpiredKeypairsRefuseTheFastPathSender(t *testing.T) {
++	pair := genTestPair(t, false)
++	done := make(chan struct{})
++	pair.Send(t, Ping, done)
++	close(done)
++
++	dev := pair[0].dev
++	var peer *Peer
++	dev.peers.RLock()
++	for _, p := range dev.peers.keyMap {
++		peer = p
++	}
++	dev.peers.RUnlock()
++	if peer == nil {
++		t.Fatal("no peer")
++	}
++	kp := peer.FastPathSendKeypair()
++	if kp == nil {
++		t.Fatal("no send keypair after a handshake")
++	}
++	if _, ok := kp.ReserveNonces(1); !ok {
++		t.Fatal("live keypair refused a nonce")
++	}
++
++	peer.ExpireCurrentKeypairs()
++
++	if got := peer.FastPathSendKeypair(); got != nil {
++		t.Fatal("FastPathSendKeypair returned an expired keypair")
++	}
++	if _, ok := kp.ReserveNonces(1); ok {
++		t.Fatal("an expired keypair still hands out nonces: a caller holding a stale pointer could send on it")
++	}
++}
+diff --git a/device/fastpath_keypair_test.go b/device/fastpath_keypair_test.go
+new file mode 100644
+index 0000000..f194c2e
+--- /dev/null
++++ b/device/fastpath_keypair_test.go
+@@ -0,0 +1,175 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
++ */
++
++package device
++
++// PACKETIO FORK: the keypair lifecycle and nonce invariants the fast path
++// rests on. fastpath_test.go covers the replay window and the observer;
++// these cover what must hold for a keypair handed outside this package.
++
++import (
++	"sync"
++	"testing"
++	"time"
++)
++
++func TestRetirementFiresBeforeTheIndexIsRemoved(t *testing.T) {
++	pair := genTestPair(t, false)
++	var (
++		mu      sync.Mutex
++		retired int
++	)
++	for i := range pair {
++		i := i
++		d := pair[i].dev
++		d.SetKeypairObserver(func(peer *Peer, kp *Keypair, e KeypairEvent) {
++			if e != KeypairRetired {
++				return
++			}
++			mu.Lock()
++			defer mu.Unlock()
++			retired++
++			if got := d.indexTable.Lookup(kp.LocalIndex()).keypair; got != kp {
++				t.Errorf("dev%d: index %d already gone (or reused) when retirement fired: %p, want %p",
++					i, kp.LocalIndex(), got, kp)
++			}
++		})
++	}
++	done := make(chan struct{})
++	pair.Send(t, Ping, done)
++	pair.Send(t, Pong, done)
++	close(done)
++	pair[0].dev.Close()
++	pair[1].dev.Close()
++	mu.Lock()
++	defer mu.Unlock()
++	if retired == 0 {
++		t.Fatal("no retirement was announced")
++	}
++}
++
++// Every keypair the observer is told about is eventually retired. A fast
++// path holds what it is given until it hears otherwise, so a keypair that
++// is dropped without a retirement is one it would decrypt with forever.
++func TestEveryEstablishedKeypairIsRetired(t *testing.T) {
++	pair := genTestPair(t, false)
++	var (
++		mu    sync.Mutex
++		live  = map[*Keypair]bool{}
++		total int
++	)
++	for i := range pair {
++		pair[i].dev.SetKeypairObserver(func(peer *Peer, kp *Keypair, e KeypairEvent) {
++			mu.Lock()
++			defer mu.Unlock()
++			switch e {
++			case KeypairEstablished:
++				live[kp] = true
++				total++
++			case KeypairRetired:
++				delete(live, kp)
++			}
++		})
++	}
++	done := make(chan struct{})
++	pair.Send(t, Ping, done)
++	pair.Send(t, Pong, done)
++	// Force a rotation: a fresh handshake on top of the live session.
++	for i := range pair {
++		for _, peer := range pair[i].dev.peers.keyMap {
++			peer.SendHandshakeInitiation(false)
++		}
++	}
++	time.Sleep(200 * time.Millisecond)
++	pair.Send(t, Ping, done)
++	close(done)
++	pair[0].dev.Close()
++	pair[1].dev.Close()
++	mu.Lock()
++	defer mu.Unlock()
++	if total < 2 {
++		t.Fatalf("only %d keypairs established", total)
++	}
++	if len(live) != 0 {
++		t.Fatalf("%d of %d keypairs were dropped without a retirement", len(live), total)
++	}
++}
++
++// Concurrent reservations carve the counter space into disjoint ranges:
++// two senders must never be handed the same nonce, and none may be handed
++// one past the limit.
++func TestReserveNoncesConcurrentRangesNeverOverlap(t *testing.T) {
++	kp := testKeypair(t)
++	const (
++		goroutines = 8
++		reserves   = 500
++		size       = 7
++	)
++	seen := make([]bool, goroutines*reserves*size+16)
++	var mu sync.Mutex
++	var wg sync.WaitGroup
++	for i := 0; i < goroutines; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for j := 0; j < reserves; j++ {
++				start, ok := kp.ReserveNonces(size)
++				if !ok {
++					t.Error("reservation refused well below the limit")
++					return
++				}
++				mu.Lock()
++				for n := start; n < start+size; n++ {
++					if n >= uint64(len(seen)) {
++						t.Errorf("nonce %d past the space the test reserved", n)
++						mu.Unlock()
++						return
++					}
++					if seen[n] {
++						t.Errorf("nonce %d handed out twice", n)
++					}
++					seen[n] = true
++				}
++				mu.Unlock()
++			}
++		}()
++	}
++	wg.Wait()
++	if got := kp.sendNonce.Load(); got != goroutines*reserves*size {
++		t.Fatalf("counter at %d after %d nonces", got, goroutines*reserves*size)
++	}
++}
++
++// The counter must not be pushed over the top by callers that keep asking.
++// There are only 2^13 counts between RejectAfterMessages and 2^64: an
++// unconditional Add would walk through them and wrap, handing out low
++// nonces a second time under the same key.
++func TestReserveNoncesCannotWrapPastTheLimit(t *testing.T) {
++	kp := testKeypair(t)
++	kp.sendNonce.Store(RejectAfterMessages - 1)
++	if _, ok := kp.ReserveNonces(1); !ok {
++		t.Fatal("the last nonce below the limit was refused")
++	}
++	var wg sync.WaitGroup
++	for i := 0; i < 8; i++ {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			for j := 0; j < 5000; j++ {
++				if _, ok := kp.ReserveNonces(1 + uint64(j%64)); ok {
++					t.Error("a nonce was handed out past the limit")
++					return
++				}
++			}
++		}()
++	}
++	wg.Wait()
++	if got := kp.sendNonce.Load(); got != RejectAfterMessages {
++		t.Fatalf("counter at %d, want it parked at %d", got, uint64(RejectAfterMessages))
++	}
++	if _, ok := kp.ReserveNonces(RejectAfterMessages + 1); ok {
++		t.Fatal("a reservation larger than the whole space succeeded")
++	}
++}
+diff --git a/device/fastpath_test.go b/device/fastpath_test.go
+new file mode 100644
+index 0000000..8b3c9a4
+--- /dev/null
++++ b/device/fastpath_test.go
+@@ -0,0 +1,162 @@
++/* SPDX-License-Identifier: MIT
++ *
++ * Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
++ */
++
++package device
++
++// PACKETIO FORK: tests for fastpath.go.
++
++import (
++	"sync"
++	"testing"
++	"time"
++
++	"golang.org/x/crypto/chacha20poly1305"
++)
++
++func testKeypair(t *testing.T) *Keypair {
++	t.Helper()
++	var key [chacha20poly1305.KeySize]byte
++	kp := new(Keypair)
++	var err error
++	if kp.send, err = chacha20poly1305.New(key[:]); err != nil {
++		t.Fatal(err)
++	}
++	kp.receive = kp.send
++	kp.created = time.Now()
++	kp.replayFilter.Reset()
++	return kp
++}
++
++// A reservation never advances the counter past RejectAfterMessages, and a
++// caller that keeps retrying after exhaustion never sees a nonce twice.
++func TestReserveNoncesClamps(t *testing.T) {
++	kp := testKeypair(t)
++	kp.sendNonce.Store(RejectAfterMessages - 100)
++	start, ok := kp.ReserveNonces(64)
++	if !ok || start != RejectAfterMessages-100 {
++		t.Fatalf("first reservation: start %d ok %v", start, ok)
++	}
++	if _, ok := kp.ReserveNonces(64); ok { // only 36 left
++		t.Fatal("reservation past the limit succeeded")
++	}
++	if got := kp.sendNonce.Load(); got != RejectAfterMessages {
++		t.Fatalf("counter parked at %d, want %d", got, uint64(RejectAfterMessages))
++	}
++	for i := 0; i < 1<<14; i++ { // more retries than there is headroom above the limit
++		if _, ok := kp.ReserveNonces(1); ok {
++			t.Fatalf("retry %d handed out a nonce after exhaustion", i)
++		}
++	}
++	if got := kp.sendNonce.Load(); got != RejectAfterMessages {
++		t.Fatalf("counter moved to %d under retries", got)
++	}
++	if _, ok := kp.ReserveNonces(0); ok {
++		t.Fatal("zero-length reservation succeeded")
++	}
++	old := testKeypair(t)
++	old.created = time.Now().Add(-RejectAfterTime)
++	if _, ok := old.ReserveNonces(1); ok {
++		t.Fatal("expired keypair handed out a nonce")
++	}
++}
++
++// Two validators on one published keypair -- this package's receive path
++// and a fast path -- must accept every counter exactly once between them.
++// With the lock removed this fails: concurrent updates to one ring block
++// lose bits, and counters read as unseen a second time.
++func TestValidateCounterConcurrent(t *testing.T) {
++	kp := testKeypair(t)
++	const n = 200000
++	var (
++		wg       sync.WaitGroup
++		accepted [2][]uint64
++	)
++	for w := 0; w < 2; w++ {
++		wg.Add(1)
++		go func(w int) {
++			defer wg.Done()
++			for c := uint64(w); c < n; c += 2 {
++				if kp.ValidateCounter(c) {
++					accepted[w] = append(accepted[w], c)
++				}
++				// The other validator sees the same counter later: a replay.
++				if kp.ValidateCounter(c ^ 1) {
++					accepted[w] = append(accepted[w], c^1)
++				}
++			}
++		}(w)
++	}
++	wg.Wait()
++	seen := make(map[uint64]int, n)
++	for _, a := range accepted {
++		for _, c := range a {
++			seen[c]++
++		}
++	}
++	for c, k := range seen {
++		if k != 1 {
++			t.Fatalf("counter %d accepted %d times", c, k)
++		}
++	}
++	if len(seen) < n-windowSlack {
++		t.Fatalf("only %d of %d counters accepted", len(seen), n)
++	}
++}
++
++// The window is 8128 wide; a validator running far ahead can legitimately
++// push a few of the other's counters out of it.
++const windowSlack = 8192
++
++// The observer sees a keypair come and go: established on both sides,
++// promoted on the responder, retired when the devices close.
++func TestKeypairObserverLifecycle(t *testing.T) {
++	pair := genTestPair(t, false)
++	type ev struct {
++		dev int
++		ev  KeypairEvent
++	}
++	var (
++		mu     sync.Mutex
++		events []ev
++		kps    = map[*Keypair]bool{}
++	)
++	for i := range pair {
++		i := i
++		pair[i].dev.SetKeypairObserver(func(peer *Peer, kp *Keypair, e KeypairEvent) {
++			mu.Lock()
++			defer mu.Unlock()
++			events = append(events, ev{i, e})
++			if peer == nil {
++				t.Errorf("event %v without a peer", e)
++			}
++			kps[kp] = true
++		})
++	}
++	done := make(chan struct{})
++	pair.Send(t, Ping, done)
++	pair.Send(t, Pong, done)
++	close(done)
++	pair[0].dev.Close()
++	pair[1].dev.Close()
++	mu.Lock()
++	defer mu.Unlock()
++	count := func(e KeypairEvent) (n int) {
++		for _, x := range events {
++			if x.ev == e {
++				n++
++			}
++		}
++		return
++	}
++	if count(KeypairEstablished) < 2 {
++		t.Fatalf("established on %d sides, events %v", count(KeypairEstablished), events)
++	}
++	if count(KeypairPromoted) < 1 {
++		t.Fatalf("no promotion, events %v", events)
++	}
++	if count(KeypairRetired) < len(kps) {
++		t.Fatalf("%d keypairs, %d retirements, events %v", len(kps), count(KeypairRetired), events)
++	}
++}
+diff --git a/device/keypair.go b/device/keypair.go
+index 0b72e19..de3c067 100644
+--- a/device/keypair.go
++++ b/device/keypair.go
+@@ -30,6 +30,11 @@ type Keypair struct {
+ 	created      time.Time
+ 	localIndex   uint32
+ 	remoteIndex  uint32
++
++	// PACKETIO FORK: guards replayFilter, which the fast path validates
++	// concurrently with this package's own receive path. See
++	// validateCounter in fastpath.go.
++	replayMu sync.Mutex
+ }
+ 
+ type Keypairs struct {
+@@ -47,6 +52,13 @@ func (kp *Keypairs) Current() *Keypair {
+ 
+ func (device *Device) DeleteKeypair(key *Keypair) {
+ 	if key != nil {
++		// PACKETIO FORK: every deletion passes here -- rotation in
++		// BeginSymmetricSession and ReceivedWithKeypair as well as teardown --
++		// so this is where a fast path learns to drop the keypair. Before the
++		// index goes, so the observer can still resolve the peer.
++		if device.keypairObserver.Load() != nil {
++			device.notifyKeypair(device.indexTable.Lookup(key.localIndex).peer, key, KeypairRetired)
++		}
+ 		device.indexTable.Delete(key.localIndex)
+ 	}
+ }
+diff --git a/device/noise-protocol.go b/device/noise-protocol.go
+index 5cf1702..c376d63 100644
+--- a/device/noise-protocol.go
++++ b/device/noise-protocol.go
+@@ -695,6 +695,9 @@ func (peer *Peer) BeginSymmetricSession() error {
+ 		device.DeleteKeypair(previous)
+ 	}
+ 
++	// PACKETIO FORK: after the rotation, so the observer sees it in its slot.
++	device.notifyKeypair(peer, keypair, KeypairEstablished)
++
+ 	return nil
+ }
+ 
+@@ -714,5 +717,7 @@ func (peer *Peer) ReceivedWithKeypair(receivedKeypair *Keypair) bool {
+ 	peer.device.DeleteKeypair(old)
+ 	keypairs.current = keypairs.next.Load()
+ 	keypairs.next.Store(nil)
++	// PACKETIO FORK: "next" is "current" now; a fast path may send on it.
++	peer.device.notifyKeypair(peer, keypairs.current, KeypairPromoted)
+ 	return true
+ }
+diff --git a/device/peer.go b/device/peer.go
+index ebf25f9..3a4ccbf 100644
+--- a/device/peer.go
++++ b/device/peer.go
+@@ -253,6 +253,9 @@ func (peer *Peer) ExpireCurrentKeypairs() {
+ 	if next := keypairs.next.Load(); next != nil {
+ 		next.sendNonce.Store(RejectAfterMessages)
+ 	}
++	// PACKETIO FORK: poisoned for sending and about to be torn down.
++	peer.device.notifyKeypair(peer, keypairs.current, KeypairRetired)
++	peer.device.notifyKeypair(peer, keypairs.next.Load(), KeypairRetired)
+ 	keypairs.Unlock()
+ }
+ 
+diff --git a/device/receive.go b/device/receive.go
+index 1392957..8c8d3c8 100644
+--- a/device/receive.go
++++ b/device/receive.go
+@@ -450,7 +450,8 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
+ 				continue
+ 			}
+ 
+-			if !elem.keypair.replayFilter.ValidateCounter(elem.counter, RejectAfterMessages) {
++			// PACKETIO FORK: through the guarded entry, see Keypair.validateCounter.
++			if !elem.keypair.validateCounter(elem.counter) {
+ 				continue
+ 			}
+ 
+-- 
+2.43.0
+

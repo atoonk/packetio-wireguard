@@ -1,0 +1,1 @@
+(no go toolchain on this box; analyse stock-12q-f68-enc-mutex.pprof on the control box)

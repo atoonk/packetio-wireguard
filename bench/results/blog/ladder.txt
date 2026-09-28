@@ -1,0 +1,8 @@
+wgpio-stock    fork=ecfc5a8 tun: clear virtioNetHdr when deleting item from tcpGROTable  tags=dpdk,stockwg     wgpio=2877dd0  sha256=04123a3402680ec3
+wgpio-p1       fork=2fbfcb3 device: expose transport keypairs for an inline fast path  tags=dpdk,wgreplay1   wgpio=2877dd0  sha256=483ff68115d1d724
+wgpio-p2       fork=7f098ed device: ValidateCounters, the replay window for a batch under one lock  tags=dpdk             wgpio=2877dd0  sha256=917019c9ebb020af
+wgpio-p3       fork=8d89d3b replay: a 131008-counter window  tags=dpdk             wgpio=2877dd0  sha256=4238257d7a4c6c72
+wgpio-p4       fork=9b70a70 device: the fast path touches the timers at most every 50 ms per peer  tags=dpdk             wgpio=2877dd0  sha256=a8bb5a2f565afbd9
+wireguard-go   fork=ecfc5a8 tun: clear virtioNetHdr when deleting item from tcpGROTable  tags=-                wgpio=-  sha256=31d36b1c87c3459a
+udpblast       fork=-                                                    tags=-                wgpio=2877dd0  sha256=dd59fb5a3fa4a14e
+wgpio-p124     fork=6a1a7ed 0001+0002+0004, 0003 omitted (review experiment)  tags=dpdk             wgpio=2877dd0  sha256=16614d80e0ba4bd5
